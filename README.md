@@ -11,15 +11,6 @@ npm run dev
 
 Then open <http://localhost:3000> and allow camera access.
 
-### Capturing reliable poses
-
-1. Select a solfège note in **Training mode** and click **Start Timed Capture**.
-2. A five-second countdown appears so you can step back and ensure your entire body fits in the frame.
-3. After the countdown finishes, the app records five pose samples over a few seconds.
-4. Review the thumbnails, pick the snapshot that looks clearest, and save it for the selected note.
-
-You can retake the sequence at any time if the stored pose no longer matches how you perform it.
-
 ## Automated Vercel deployments
 
 This repository contains a GitHub Actions workflow that can deploy the site to [Vercel](https://vercel.com/). Follow these steps to connect your Vercel project:

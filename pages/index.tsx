@@ -10,11 +10,6 @@ type NormalizedKeypoint = {
 };
 
 type PoseLibrary = Record<string, NormalizedKeypoint[]>;
-type PoseCandidate = {
-  id: string;
-  keypoints: NormalizedKeypoint[];
-  thumbnail: string;
-};
 
 const NOTES = ['do', 're', 'mi', 'fa', 'so', 'la', 'ti'];
 const MATCH_THRESHOLD = 0.35;
@@ -35,12 +30,6 @@ export default function Home() {
   const [currentNote, setCurrentNote] = useState<string>('None');
   const [statusMessage, setStatusMessage] = useState<string>('Initializing pose detector...');
   const [errorMessage, setErrorMessage] = useState<string>('');
-  const [isCountdownActive, setIsCountdownActive] = useState(false);
-  const [countdownValue, setCountdownValue] = useState<number | null>(null);
-  const [isCapturingSequence, setIsCapturingSequence] = useState(false);
-  const [captureCandidates, setCaptureCandidates] = useState<PoseCandidate[] | null>(null);
-  const [selectedCandidateIndex, setSelectedCandidateIndex] = useState<number | null>(null);
-  const [captureProgress, setCaptureProgress] = useState(0);
 
   const adjacentPairs = useMemo(
     () => poseDetection.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet),
@@ -64,7 +53,7 @@ export default function Home() {
         );
 
         detectorRef.current = detector;
-        setStatusMessage('Pose detector ready. Step back so your full body is visible before capturing.');
+        setStatusMessage('Pose detector ready. Position yourself within the frame.');
       } catch (error) {
         console.error('Error loading MoveNet detector:', error);
         setErrorMessage('Unable to load the MoveNet detector. Please refresh the page.');
@@ -153,126 +142,23 @@ export default function Home() {
     };
   }, [mode, poseLibrary]);
 
-  useEffect(() => {
-    if (!isCountdownActive || countdownValue === null) {
+  const capturePose = () => {
+    if (!poseRef.current) {
+      setStatusMessage('No pose detected to capture. Align yourself within the camera view.');
       return;
     }
 
-    if (countdownValue > 0) {
-      setStatusMessage(`Hold your pose. Capturing in ${countdownValue}...`);
-      const timeoutId = setTimeout(() => {
-        setCountdownValue((value) => {
-          if (value === null) {
-            return value;
-          }
-          return value > 0 ? value - 1 : value;
-        });
-      }, 1000);
-
-      return () => clearTimeout(timeoutId);
-    }
-
-    setIsCountdownActive(false);
-    setCountdownValue(null);
-    void collectPoseCandidates();
-  }, [countdownValue, isCountdownActive]);
-
-  const startPoseCaptureSequence = () => {
-    if (isCountdownActive || isCapturingSequence) {
+    const normalizedKeypoints = normalizeKeypoints(poseRef.current.keypoints);
+    if (!normalizedKeypoints) {
+      setStatusMessage('Pose confidence is too low. Try a clearer pose.');
       return;
     }
 
-    if (!videoRef.current || videoRef.current.videoWidth === 0 || videoRef.current.videoHeight === 0) {
-      setStatusMessage('Camera feed not ready yet. Wait a moment and try again.');
-      return;
-    }
-
-    setCaptureCandidates(null);
-    setSelectedCandidateIndex(null);
-    setCountdownValue(5);
-    setIsCountdownActive(true);
-    setStatusMessage('Move into position. Capture begins in 5 seconds.');
-  };
-
-  const collectPoseCandidates = async () => {
-    if (!videoRef.current) {
-      setStatusMessage('Camera feed not available. Refresh the page and try again.');
-      return;
-    }
-
-    const wait = (ms: number) => new Promise<void>((resolve) => {
-      setTimeout(resolve, ms);
-    });
-
-    setIsCapturingSequence(true);
-    setCaptureProgress(0);
-    setStatusMessage('Capturing pose samples...');
-
-    const samples: PoseCandidate[] = [];
-    const video = videoRef.current;
-
-    for (let index = 0; index < 5; index += 1) {
-      if (index === 0) {
-        await wait(200);
-      } else {
-        await wait(1000);
-      }
-
-      const pose = poseRef.current;
-      if (!pose) {
-        continue;
-      }
-
-      const normalizedKeypoints = normalizeKeypoints(pose.keypoints);
-      if (!normalizedKeypoints) {
-        continue;
-      }
-
-      const thumbnail = captureFrameThumbnail(video);
-      if (!thumbnail) {
-        continue;
-      }
-
-      samples.push({
-        id: `${Date.now()}-${index}`,
-        keypoints: normalizedKeypoints,
-        thumbnail,
-      });
-      setCaptureProgress(samples.length);
-    }
-
-    setIsCapturingSequence(false);
-    setCaptureProgress(0);
-
-    if (samples.length > 0) {
-      setCaptureCandidates(samples);
-      setSelectedCandidateIndex(0);
-      setStatusMessage('Select your favorite snapshot, then click Save Pose.');
-    } else {
-      setCaptureCandidates(null);
-      setStatusMessage('Could not capture a confident pose. Make sure you are fully in frame and try again.');
-    }
-  };
-
-  const saveSelectedPose = () => {
-    if (!captureCandidates || captureCandidates.length === 0) {
-      setStatusMessage('Capture a pose sequence before saving.');
-      return;
-    }
-
-    if (selectedCandidateIndex === null) {
-      setStatusMessage('Select one of the snapshots to keep.');
-      return;
-    }
-
-    const chosenCandidate = captureCandidates[selectedCandidateIndex];
     setPoseLibrary((prev) => ({
       ...prev,
-      [selectedNote]: chosenCandidate.keypoints,
+      [selectedNote]: normalizedKeypoints,
     }));
-    setCaptureCandidates(null);
-    setSelectedCandidateIndex(null);
-    setStatusMessage(`Saved pose for ${selectedNote.toUpperCase()}.`);
+    setStatusMessage(`Captured pose for ${selectedNote.toUpperCase()}.`);
   };
 
   const clearPose = (note: string) => {
@@ -282,10 +168,6 @@ export default function Home() {
       return updated;
     });
     setStatusMessage(`Cleared saved pose for ${note.toUpperCase()}.`);
-    if (note === selectedNote) {
-      setCaptureCandidates(null);
-      setSelectedCandidateIndex(null);
-    }
   };
 
   const playNote = (note: string) => {
@@ -376,17 +258,6 @@ export default function Home() {
                 className="w-full rounded-xl"
               />
               <canvas ref={canvasRef} className="absolute inset-0" />
-              {isCountdownActive && countdownValue !== null && (
-                <div className="absolute inset-0 bg-slate-900/70 flex items-center justify-center">
-                  <span className="text-7xl font-bold text-emerald-300">{countdownValue}</span>
-                </div>
-              )}
-              {isCapturingSequence && (
-                <div className="absolute inset-0 bg-slate-900/70 flex flex-col items-center justify-center space-y-2">
-                  <span className="text-lg font-semibold">Capturing pose samples...</span>
-                  <span className="text-sm text-slate-200">Captured {captureProgress} / 5</span>
-                </div>
-              )}
             </div>
             <div className="bg-slate-800 rounded-xl p-4 space-y-3">
               <div className="flex flex-wrap gap-3 items-center justify-between">
@@ -400,7 +271,7 @@ export default function Home() {
                       onClick={() => {
                         setMode('train');
                         setCurrentNote('None');
-                        setStatusMessage('Training mode: use the countdown capture to store poses for each note.');
+                        setStatusMessage('Training mode: capture poses for each note.');
                       }}
                     >
                       1. Train Poses
@@ -437,11 +308,7 @@ export default function Home() {
                     <select
                       id="note-select"
                       value={selectedNote}
-                      onChange={(event) => {
-                        setSelectedNote(event.target.value);
-                        setCaptureCandidates(null);
-                        setSelectedCandidateIndex(null);
-                      }}
+                      onChange={(event) => setSelectedNote(event.target.value)}
                       className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
                     >
                       {NOTES.map((note) => (
@@ -453,75 +320,23 @@ export default function Home() {
                   </div>
                   <div className="flex flex-wrap gap-3">
                     <button
-                      onClick={startPoseCaptureSequence}
-                      disabled={isCountdownActive || isCapturingSequence}
-                      className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
-                        isCountdownActive || isCapturingSequence
-                          ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                          : 'bg-emerald-500 text-slate-900 hover:bg-emerald-400'
-                      }`}
+                      onClick={capturePose}
+                      className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400 transition-colors"
                     >
-                      Start Timed Capture
+                      Capture Current Pose
                     </button>
                     {poseLibrary[selectedNote] && (
                       <button
                         onClick={() => clearPose(selectedNote)}
-                        disabled={isCapturingSequence || isCountdownActive}
-                        className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
-                          isCapturingSequence || isCountdownActive
-                            ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                            : 'bg-red-500 text-white hover:bg-red-400'
-                        }`}
+                        className="px-4 py-2 rounded-lg bg-red-500 text-white font-semibold hover:bg-red-400 transition-colors"
                       >
                         Clear {selectedNote.toUpperCase()}
                       </button>
                     )}
                   </div>
                   <p className="text-sm text-slate-400">
-                    Step back until your whole body fits in frame. The app will count down from five, then capture five samples over the next few seconds so you can pick the clearest one.
+                    Stand still for a moment before capturing to ensure a confident reading. You can re-capture any note at any time.
                   </p>
-                  {captureCandidates && (
-                    <div className="space-y-3">
-                      <p className="text-sm font-medium text-slate-200">Choose the snapshot that best represents your pose.</p>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                        {captureCandidates.map((candidate, index) => (
-                          <button
-                            key={candidate.id}
-                            type="button"
-                            onClick={() => setSelectedCandidateIndex(index)}
-                            className={`relative rounded-lg overflow-hidden border-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
-                              selectedCandidateIndex === index ? 'border-emerald-400' : 'border-transparent'
-                            }`}
-                          >
-                            <img src={candidate.thumbnail} alt={`Pose sample ${index + 1}`} className="w-full h-32 object-cover" />
-                            <span className="absolute bottom-1 right-2 bg-slate-900/70 px-2 py-0.5 text-xs rounded-full">
-                              Sample {index + 1}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                      <div className="flex flex-wrap gap-3">
-                        <button
-                          type="button"
-                          onClick={saveSelectedPose}
-                          className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400 transition-colors"
-                        >
-                          Save Pose for {selectedNote.toUpperCase()}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={startPoseCaptureSequence}
-                          disabled={isCountdownActive || isCapturingSequence}
-                          className="px-4 py-2 rounded-lg bg-slate-700 text-slate-200 font-semibold hover:bg-slate-600 transition-colors"
-                        >
-                          Retake Samples
-                        </button>
-                      </div>
-                      <p className="text-xs text-slate-400">
-                        Picking the sharpest snapshot leads to better recognition during performance.
-                      </p>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -567,26 +382,6 @@ export default function Home() {
       </div>
     </div>
   );
-}
-
-function captureFrameThumbnail(video: HTMLVideoElement): string | null {
-  const canvas = document.createElement('canvas');
-  const width = video.videoWidth;
-  const height = video.videoHeight;
-
-  if (width === 0 || height === 0) {
-    return null;
-  }
-
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (!context) {
-    return null;
-  }
-
-  context.drawImage(video, 0, 0, width, height);
-  return canvas.toDataURL('image/jpeg', 0.85);
 }
 
 function normalizeKeypoints(keypoints: poseDetection.Keypoint[]): NormalizedKeypoint[] | null {
