@@ -1,7 +1,6 @@
 # FingerMusic
 
-A Next.js web app that maps custom body poses detected by MoveNet to solfège notes for playful music training. The home
-screen displays the active build version so you can confirm which release is deployed.
+A Next.js web app that maps custom body poses detected by MoveNet to solfège notes for playful music training.
 
 ## Local development
 
@@ -11,20 +10,6 @@ npm run dev
 ```
 
 Then open <http://localhost:3000> and allow camera access.
-
-### Capturing reliable poses
-
-1. Select a solfège note in **Training mode** and click **Start Timed Capture**.
-2. A five-second countdown appears so you can step back and ensure your entire body fits in the frame. The timer fills the
-   video feed—if you don’t see it, confirm you’re in Training mode and that the webcam preview is active.
-3. After the countdown finishes, the app records five pose samples over a few seconds.
-4. Review the thumbnails, pick the snapshot that looks clearest, and save it for the selected note.
-
-You can retake the sequence at any time if the stored pose no longer matches how you perform it.
-
-### Performing with synthesized notes
-
-When you switch to **Perform** mode the app generates each solfège pitch on the fly using the browser's Web Audio API, so no additional audio downloads are required. Hold one of your saved poses until the status banner reports the detected note; you should hear a short tone within a fraction of a second. If you do not, verify that your device's volume is up and the browser tab is not muted.
 
 ## Automated Vercel deployments
 

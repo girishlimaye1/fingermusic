@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
 import * as poseDetection from '@tensorflow-models/pose-detection';
-import packageJson from '../package.json';
 
 type NormalizedKeypoint = {
   x: number;
@@ -11,17 +10,9 @@ type NormalizedKeypoint = {
 };
 
 type PoseLibrary = Record<string, NormalizedKeypoint[]>;
-type PoseCandidate = {
-  id: string;
-  keypoints: NormalizedKeypoint[];
-  thumbnail: string;
-};
 
 const NOTES = ['do', 're', 'mi', 'fa', 'so', 'la', 'ti'];
 const MATCH_THRESHOLD = 0.35;
-const COUNTDOWN_START = 5;
-const SAMPLE_COUNT = 5;
-const APP_VERSION = `v${packageJson.version}`;
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -29,11 +20,8 @@ export default function Home() {
   const detectorRef = useRef<poseDetection.PoseDetector | null>(null);
   const poseRef = useRef<poseDetection.Pose | null>(null);
   const animationFrameRef = useRef<number>();
-  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastPlayedNoteRef = useRef<string>('');
   const lastPlayTimestampRef = useRef<number>(0);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const activeOscillatorRef = useRef<{ oscillator: OscillatorNode; gain: GainNode } | null>(null);
 
   const [isLoadingDetector, setIsLoadingDetector] = useState(true);
   const [poseLibrary, setPoseLibrary] = useState<PoseLibrary>({});
@@ -42,12 +30,6 @@ export default function Home() {
   const [currentNote, setCurrentNote] = useState<string>('None');
   const [statusMessage, setStatusMessage] = useState<string>('Initializing pose detector...');
   const [errorMessage, setErrorMessage] = useState<string>('');
-  const [countdownActive, setCountdownActive] = useState(false);
-  const [countdownValue, setCountdownValue] = useState<number | null>(null);
-  const [isCapturingSequence, setIsCapturingSequence] = useState(false);
-  const [captureCandidates, setCaptureCandidates] = useState<PoseCandidate[] | null>(null);
-  const [selectedCandidateIndex, setSelectedCandidateIndex] = useState<number | null>(null);
-  const [captureProgress, setCaptureProgress] = useState(0);
 
   const adjacentPairs = useMemo(
     () => poseDetection.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet),
@@ -71,7 +53,7 @@ export default function Home() {
         );
 
         detectorRef.current = detector;
-        setStatusMessage('Pose detector ready. Step back so your full body is visible before capturing.');
+        setStatusMessage('Pose detector ready. Position yourself within the frame.');
       } catch (error) {
         console.error('Error loading MoveNet detector:', error);
         setErrorMessage('Unable to load the MoveNet detector. Please refresh the page.');
@@ -160,171 +142,23 @@ export default function Home() {
     };
   }, [mode, poseLibrary]);
 
-  useEffect(() => {
-    return () => {
-      activeOscillatorRef.current?.oscillator.stop();
-      activeOscillatorRef.current?.gain.disconnect();
-      audioContextRef.current?.close().catch((error) => {
-        console.error('Error closing audio context:', error);
-      });
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!countdownActive) {
-      if (countdownIntervalRef.current) {
-        clearInterval(countdownIntervalRef.current);
-        countdownIntervalRef.current = null;
-      }
+  const capturePose = () => {
+    if (!poseRef.current) {
+      setStatusMessage('No pose detected to capture. Align yourself within the camera view.');
       return;
     }
 
-    if (countdownIntervalRef.current) {
-      clearInterval(countdownIntervalRef.current);
-    }
-
-    countdownIntervalRef.current = setInterval(() => {
-      setCountdownValue((value) => {
-        if (value === null) {
-          return value;
-        }
-
-        if (value <= 1) {
-          return 0;
-        }
-
-        return value - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (countdownIntervalRef.current) {
-        clearInterval(countdownIntervalRef.current);
-        countdownIntervalRef.current = null;
-      }
-    };
-  }, [countdownActive]);
-
-  useEffect(() => {
-    if (!countdownActive || countdownValue === null) {
+    const normalizedKeypoints = normalizeKeypoints(poseRef.current.keypoints);
+    if (!normalizedKeypoints) {
+      setStatusMessage('Pose confidence is too low. Try a clearer pose.');
       return;
     }
 
-    if (countdownValue === 0) {
-      if (countdownIntervalRef.current) {
-        clearInterval(countdownIntervalRef.current);
-        countdownIntervalRef.current = null;
-      }
-      setCountdownActive(false);
-      setCountdownValue(null);
-      void collectPoseCandidates();
-      return;
-    }
-
-    setStatusMessage(`Hold your pose. Capturing in ${countdownValue}...`);
-  }, [countdownValue, countdownActive]);
-
-  const startPoseCaptureSequence = () => {
-    if (countdownActive || isCapturingSequence) {
-      return;
-    }
-
-    if (!videoRef.current || videoRef.current.videoWidth === 0 || videoRef.current.videoHeight === 0) {
-      setStatusMessage('Camera feed not ready yet. Wait a moment and try again.');
-      return;
-    }
-
-    if (countdownIntervalRef.current) {
-      clearInterval(countdownIntervalRef.current);
-      countdownIntervalRef.current = null;
-    }
-
-    setCaptureCandidates(null);
-    setSelectedCandidateIndex(null);
-    setCountdownValue(COUNTDOWN_START);
-    setCountdownActive(true);
-    setStatusMessage(`Move into position. Capture begins in ${COUNTDOWN_START} seconds.`);
-  };
-
-  const collectPoseCandidates = async () => {
-    if (!videoRef.current) {
-      setStatusMessage('Camera feed not available. Refresh the page and try again.');
-      return;
-    }
-
-    const wait = (ms: number) => new Promise<void>((resolve) => {
-      setTimeout(resolve, ms);
-    });
-
-    setIsCapturingSequence(true);
-    setCaptureProgress(0);
-    setStatusMessage('Capturing pose samples...');
-
-    const samples: PoseCandidate[] = [];
-    const video = videoRef.current;
-
-    for (let index = 0; index < SAMPLE_COUNT; index += 1) {
-      if (index === 0) {
-        await wait(200);
-      } else {
-        await wait(1000);
-      }
-
-      const pose = poseRef.current;
-      if (!pose) {
-        continue;
-      }
-
-      const normalizedKeypoints = normalizeKeypoints(pose.keypoints);
-      if (!normalizedKeypoints) {
-        continue;
-      }
-
-      const thumbnail = captureFrameThumbnail(video);
-      if (!thumbnail) {
-        continue;
-      }
-
-      samples.push({
-        id: `${Date.now()}-${index}`,
-        keypoints: normalizedKeypoints,
-        thumbnail,
-      });
-      setCaptureProgress(samples.length);
-    }
-
-    setIsCapturingSequence(false);
-    setCaptureProgress(0);
-
-    if (samples.length > 0) {
-      setCaptureCandidates(samples);
-      setSelectedCandidateIndex(0);
-      setStatusMessage('Select your favorite snapshot, then click Save Pose.');
-    } else {
-      setCaptureCandidates(null);
-      setStatusMessage('Could not capture a confident pose. Make sure you are fully in frame and try again.');
-    }
-  };
-
-  const saveSelectedPose = () => {
-    if (!captureCandidates || captureCandidates.length === 0) {
-      setStatusMessage('Capture a pose sequence before saving.');
-      return;
-    }
-
-    if (selectedCandidateIndex === null) {
-      setStatusMessage('Select one of the snapshots to keep.');
-      return;
-    }
-
-    const chosenCandidate = captureCandidates[selectedCandidateIndex];
     setPoseLibrary((prev) => ({
       ...prev,
-      [selectedNote]: chosenCandidate.keypoints,
+      [selectedNote]: normalizedKeypoints,
     }));
-    setCaptureCandidates(null);
-    setSelectedCandidateIndex(null);
-    setStatusMessage(`Saved pose for ${selectedNote.toUpperCase()}.`);
+    setStatusMessage(`Captured pose for ${selectedNote.toUpperCase()}.`);
   };
 
   const clearPose = (note: string) => {
@@ -334,84 +168,16 @@ export default function Home() {
       return updated;
     });
     setStatusMessage(`Cleared saved pose for ${note.toUpperCase()}.`);
-    if (note === selectedNote) {
-      setCaptureCandidates(null);
-      setSelectedCandidateIndex(null);
-    }
   };
 
-  const playNote = async (note: string) => {
+  const playNote = (note: string) => {
     const now = Date.now();
     if (lastPlayedNoteRef.current === note && now - lastPlayTimestampRef.current < 800) {
       return;
     }
 
-    const frequencyMap: Record<string, number> = {
-      do: 261.63,
-      re: 293.66,
-      mi: 329.63,
-      fa: 349.23,
-      so: 392,
-      la: 440,
-      ti: 493.88,
-    };
-
-    const frequency = frequencyMap[note];
-    if (!frequency) {
-      return;
-    }
-
-    if (!audioContextRef.current) {
-      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioContextClass) {
-        console.error('Web Audio API is not supported in this browser.');
-        return;
-      }
-      audioContextRef.current = new AudioContextClass();
-    }
-
-    const audioContext = audioContextRef.current;
-    if (!audioContext) {
-      return;
-    }
-
-    if (audioContext.state === 'suspended') {
-      try {
-        await audioContext.resume();
-      } catch (error) {
-        console.error('Unable to resume audio context:', error);
-        return;
-      }
-    }
-
-    activeOscillatorRef.current?.oscillator.stop();
-    activeOscillatorRef.current?.gain.disconnect();
-
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
-
-    gain.gain.setValueAtTime(0, audioContext.currentTime);
-    gain.gain.linearRampToValueAtTime(0.35, audioContext.currentTime + 0.02);
-    gain.gain.linearRampToValueAtTime(0.25, audioContext.currentTime + 0.3);
-    gain.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.8);
-
-    oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-
-    oscillator.start();
-    oscillator.stop(audioContext.currentTime + 1);
-
-    activeOscillatorRef.current = { oscillator, gain };
-
-    oscillator.addEventListener('ended', () => {
-      if (activeOscillatorRef.current?.oscillator === oscillator) {
-        gain.disconnect();
-        activeOscillatorRef.current = null;
-      }
-    });
+    const audio = new Audio(`/notes/${note}.mp3`);
+    audio.play().catch((error) => console.error('Error playing audio:', error));
 
     lastPlayedNoteRef.current = note;
     lastPlayTimestampRef.current = now;
@@ -476,16 +242,10 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-slate-900 text-white">
       <div className="max-w-5xl mx-auto px-6 py-10">
-        <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <h1 className="text-4xl font-bold">FingerMusic Pose Trainer</h1>
-          <p className="text-slate-300 max-w-2xl">
-            Use your camera to map body poses to musical notes and perform hands-free melodies.
-          </p>
-          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-widest text-emerald-200">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true" />
-            <span>Version {APP_VERSION}</span>
-          </span>
-        </div>
+        <h1 className="text-4xl font-bold mb-6 text-center">FingerMusic Pose Trainer</h1>
+        <p className="text-center text-slate-300 mb-8">
+          Use your camera to map body poses to musical notes and perform hands-free melodies.
+        </p>
 
         <div className="flex flex-col lg:flex-row gap-6">
           <div className="flex-1 space-y-4">
@@ -498,25 +258,6 @@ export default function Home() {
                 className="w-full rounded-xl"
               />
               <canvas ref={canvasRef} className="absolute inset-0" />
-              {countdownActive && countdownValue !== null && (
-                <div className="absolute inset-0 z-10 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center pointer-events-none">
-                  <div className="flex flex-col items-center gap-2 text-center">
-                    <span className="uppercase tracking-widest text-sm text-emerald-200">Get ready</span>
-                    <span className="text-7xl font-black text-emerald-300 drop-shadow-lg">
-                      {countdownValue > 0 ? countdownValue : 'Go!'}
-                    </span>
-                    <span className="text-sm text-slate-200">
-                      Capture starts after the countdown. Step back so your full body fits in frame.
-                    </span>
-                  </div>
-                </div>
-              )}
-              {isCapturingSequence && (
-                <div className="absolute inset-0 bg-slate-900/70 flex flex-col items-center justify-center space-y-2">
-                  <span className="text-lg font-semibold">Capturing pose samples...</span>
-                  <span className="text-sm text-slate-200">Captured {captureProgress} / {SAMPLE_COUNT}</span>
-                </div>
-              )}
             </div>
             <div className="bg-slate-800 rounded-xl p-4 space-y-3">
               <div className="flex flex-wrap gap-3 items-center justify-between">
@@ -530,7 +271,7 @@ export default function Home() {
                       onClick={() => {
                         setMode('train');
                         setCurrentNote('None');
-                        setStatusMessage('Training mode: use the countdown capture to store poses for each note.');
+                        setStatusMessage('Training mode: capture poses for each note.');
                       }}
                     >
                       1. Train Poses
@@ -567,11 +308,7 @@ export default function Home() {
                     <select
                       id="note-select"
                       value={selectedNote}
-                      onChange={(event) => {
-                        setSelectedNote(event.target.value);
-                        setCaptureCandidates(null);
-                        setSelectedCandidateIndex(null);
-                      }}
+                      onChange={(event) => setSelectedNote(event.target.value)}
                       className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
                     >
                       {NOTES.map((note) => (
@@ -583,104 +320,23 @@ export default function Home() {
                   </div>
                   <div className="flex flex-wrap gap-3">
                     <button
-                      onClick={startPoseCaptureSequence}
-                      disabled={countdownActive || isCapturingSequence}
-                      className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
-                        countdownActive || isCapturingSequence
-                          ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                          : 'bg-emerald-500 text-slate-900 hover:bg-emerald-400'
-                      }`}
+                      onClick={capturePose}
+                      className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400 transition-colors"
                     >
-                      {countdownActive
-                        ? `Counting down (${countdownValue ?? '...'})`
-                        : isCapturingSequence
-                        ? 'Capturing sequence...'
-                        : 'Start Timed Capture'}
+                      Capture Current Pose
                     </button>
                     {poseLibrary[selectedNote] && (
                       <button
                         onClick={() => clearPose(selectedNote)}
-                        disabled={isCapturingSequence || countdownActive}
-                        className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
-                          isCapturingSequence || countdownActive
-                            ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                            : 'bg-red-500 text-white hover:bg-red-400'
-                        }`}
+                        className="px-4 py-2 rounded-lg bg-red-500 text-white font-semibold hover:bg-red-400 transition-colors"
                       >
                         Clear {selectedNote.toUpperCase()}
                       </button>
                     )}
                   </div>
-                  {countdownActive && countdownValue !== null && (
-                    <div
-                      className="flex items-center gap-3 rounded-lg border border-emerald-400/40 bg-emerald-500/10 px-3 py-2 text-emerald-100"
-                      aria-live="assertive"
-                    >
-                      <span className="text-2xl font-semibold leading-none">{countdownValue}</span>
-                      <span className="text-sm">
-                        Countdown in progress—hold your pose steady until capture begins.
-                      </span>
-                    </div>
-                  )}
-                  {isCapturingSequence && (
-                    <div
-                      className="flex items-center gap-3 rounded-lg border border-slate-500/60 bg-slate-700/60 px-3 py-2 text-slate-100"
-                      aria-live="assertive"
-                    >
-                      <span className="text-2xl font-semibold leading-none">{captureProgress} / {SAMPLE_COUNT}</span>
-                      <span className="text-sm">Recording pose samples—keep your stance consistent.</span>
-                    </div>
-                  )}
                   <p className="text-sm text-slate-400">
-                    Step back until your whole body fits in frame. The app will count down from {COUNTDOWN_START}{' '}seconds,
-                    then capture {SAMPLE_COUNT} samples over the next few seconds so you can pick the clearest one.
+                    Stand still for a moment before capturing to ensure a confident reading. You can re-capture any note at any time.
                   </p>
-                  <div className="rounded-lg border border-emerald-400/40 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-100">
-                    <span className="font-semibold">Tip:</span> After you press <em>Start Timed Capture</em>, a large 5-4-3-2-1 timer
-                    covers the video feed. If you don’t see it, confirm you’re in Training mode and the camera preview is visible.
-                  </div>
-                  {captureCandidates && (
-                    <div className="space-y-3">
-                      <p className="text-sm font-medium text-slate-200">Choose the snapshot that best represents your pose.</p>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                        {captureCandidates.map((candidate, index) => (
-                          <button
-                            key={candidate.id}
-                            type="button"
-                            onClick={() => setSelectedCandidateIndex(index)}
-                            className={`relative rounded-lg overflow-hidden border-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
-                              selectedCandidateIndex === index ? 'border-emerald-400' : 'border-transparent'
-                            }`}
-                          >
-                            <img src={candidate.thumbnail} alt={`Pose sample ${index + 1}`} className="w-full h-32 object-cover" />
-                            <span className="absolute bottom-1 right-2 bg-slate-900/70 px-2 py-0.5 text-xs rounded-full">
-                              Sample {index + 1}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                      <div className="flex flex-wrap gap-3">
-                        <button
-                          type="button"
-                          onClick={saveSelectedPose}
-                          className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400 transition-colors"
-                        >
-                          Save Pose for {selectedNote.toUpperCase()}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={startPoseCaptureSequence}
-                          disabled={countdownActive || isCapturingSequence}
-                          className="px-4 py-2 rounded-lg bg-slate-700 text-slate-200 font-semibold hover:bg-slate-600 transition-colors"
-                        >
-                          Retake Samples
-                        </button>
-                      </div>
-                      <p className="text-xs text-slate-400">
-                        Picking the sharpest snapshot leads to better recognition during performance.
-                      </p>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -691,7 +347,7 @@ export default function Home() {
               )}
 
               <div className="pt-3 border-t border-slate-700">
-                <p className="text-sm text-slate-300" aria-live="polite">{statusMessage}</p>
+                <p className="text-sm text-slate-300">{statusMessage}</p>
                 {errorMessage && <p className="text-sm text-red-400 mt-2">{errorMessage}</p>}
                 {isLoadingDetector && <p className="text-sm text-slate-400 mt-2">Loading MoveNet model...</p>}
               </div>
@@ -726,26 +382,6 @@ export default function Home() {
       </div>
     </div>
   );
-}
-
-function captureFrameThumbnail(video: HTMLVideoElement): string | null {
-  const canvas = document.createElement('canvas');
-  const width = video.videoWidth;
-  const height = video.videoHeight;
-
-  if (width === 0 || height === 0) {
-    return null;
-  }
-
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (!context) {
-    return null;
-  }
-
-  context.drawImage(video, 0, 0, width, height);
-  return canvas.toDataURL('image/jpeg', 0.85);
 }
 
 function normalizeKeypoints(keypoints: poseDetection.Keypoint[]): NormalizedKeypoint[] | null {
