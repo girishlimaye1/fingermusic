@@ -1,470 +1,410 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
 import * as poseDetection from '@tensorflow-models/pose-detection';
 
-type NormalizedKeypoint = {
-  x: number;
-  y: number;
-  score?: number;
+type SavedPose = {
+  keypoints: Array<{ x: number; y: number; score?: number }>;
 };
 
-type PoseLibrary = Record<string, NormalizedKeypoint[]>;
+type PoseLibrary = {
+  [key: string]: SavedPose;
+};
 
 const NOTES = ['do', 're', 'mi', 'fa', 'so', 'la', 'ti'];
-const MATCH_THRESHOLD = 0.35;
 
 export default function Home() {
+  const [screen, setScreen] = useState<'setup' | 'play'>('setup');
+  const [poseLibrary, setPoseLibrary] = useState<PoseLibrary>({});
+  const [currentNote, setCurrentNote] = useState<string>('');
+  const [selectedNote, setSelectedNote] = useState<string>('do');
+  const [isModelLoading, setIsModelLoading] = useState(true);
+  const [detectedNote, setDetectedNote] = useState<string>('');
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const detectorRef = useRef<poseDetection.PoseDetector | null>(null);
-  const poseRef = useRef<poseDetection.Pose | null>(null);
-  const animationFrameRef = useRef<number>();
-  const lastPlayedNoteRef = useRef<string>('');
-  const lastPlayTimestampRef = useRef<number>(0);
+  const animationRef = useRef<number>();
+  const lastPlayedRef = useRef<{ note: string; time: number }>({ note: '', time: 0 });
 
-  const [isLoadingDetector, setIsLoadingDetector] = useState(true);
-  const [poseLibrary, setPoseLibrary] = useState<PoseLibrary>({});
-  const [selectedNote, setSelectedNote] = useState<string>(NOTES[0]);
-  const [mode, setMode] = useState<'train' | 'perform'>('train');
-  const [currentNote, setCurrentNote] = useState<string>('None');
-  const [statusMessage, setStatusMessage] = useState<string>('Initializing pose detector...');
-  const [errorMessage, setErrorMessage] = useState<string>('');
-
-  const adjacentPairs = useMemo(
-    () => poseDetection.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet),
-    []
-  );
-
+  // Initialize pose detector
   useEffect(() => {
-    const loadDetector = async () => {
+    const initDetector = async () => {
       try {
         await tf.ready();
-        if (tf.getBackend() !== 'webgl') {
-          await tf.setBackend('webgl');
-        }
+        await tf.setBackend('webgl');
 
-        const detectorConfig: poseDetection.MoveNetModelConfig = {
-          modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
-        };
         const detector = await poseDetection.createDetector(
           poseDetection.SupportedModels.MoveNet,
-          detectorConfig
+          { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
         );
 
         detectorRef.current = detector;
-        setStatusMessage('Pose detector ready. Position yourself within the frame.');
+        setIsModelLoading(false);
       } catch (error) {
-        console.error('Error loading MoveNet detector:', error);
-        setErrorMessage('Unable to load the MoveNet detector. Please refresh the page.');
-      } finally {
-        setIsLoadingDetector(false);
+        console.error('Failed to load model:', error);
+        alert('Failed to load pose detection model. Please refresh the page.');
       }
     };
 
-    loadDetector();
+    initDetector();
 
     return () => {
       detectorRef.current?.dispose();
-      detectorRef.current = null;
     };
   }, []);
 
+  // Start camera
   useEffect(() => {
     const startCamera = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          }
+        });
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          await videoRef.current.play();
         }
       } catch (error) {
-        console.error('Error accessing the camera:', error);
-        setErrorMessage('Unable to access the camera. Please allow camera permissions and refresh.');
+        console.error('Camera error:', error);
+        alert('Please allow camera access to use this app.');
       }
     };
 
     startCamera();
 
     return () => {
-      const tracks = (videoRef.current?.srcObject as MediaStream | null)?.getTracks();
-      tracks?.forEach((track) => track.stop());
+      const stream = videoRef.current?.srcObject as MediaStream;
+      stream?.getTracks().forEach(track => track.stop());
     };
   }, []);
 
+  // Pose detection loop
   useEffect(() => {
-    const detectPoses = async () => {
-      if (!detectorRef.current || !videoRef.current) {
-        animationFrameRef.current = requestAnimationFrame(detectPoses);
+    const detectPose = async () => {
+      if (!detectorRef.current || !videoRef.current || !canvasRef.current) {
+        animationRef.current = requestAnimationFrame(detectPose);
         return;
       }
 
       const video = videoRef.current;
-      const poses = await detectorRef.current.estimatePoses(video, {
-        maxPoses: 1,
-        flipHorizontal: true,
-      });
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
 
-      const pose = poses[0];
-      if (pose) {
-        poseRef.current = pose;
-        drawPose(pose);
+      if (video.readyState === 4) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
 
-        if (mode === 'perform' && Object.keys(poseLibrary).length > 0) {
-          const detectedNote = classifyPose(pose, poseLibrary);
-          if (detectedNote) {
-            setCurrentNote(detectedNote);
-            playNote(detectedNote);
-            setStatusMessage(`Detected pose for ${detectedNote.toUpperCase()}`);
-          } else {
-            setCurrentNote('None');
-            setStatusMessage('No matching pose detected. Try adjusting your stance.');
+        const poses = await detectorRef.current.estimatePoses(video);
+
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (poses.length > 0) {
+          const pose = poses[0];
+          drawPose(pose, ctx!);
+
+          if (screen === 'play') {
+            const matched = matchPose(pose);
+            if (matched) {
+              setDetectedNote(matched);
+              playNote(matched);
+            } else {
+              setDetectedNote('');
+            }
           }
         }
-      } else {
-        clearCanvas();
-        poseRef.current = null;
-        if (mode === 'perform') {
-          setCurrentNote('None');
-          setStatusMessage('No person detected. Step into the frame.');
-        }
       }
 
-      animationFrameRef.current = requestAnimationFrame(detectPoses);
+      animationRef.current = requestAnimationFrame(detectPose);
     };
 
-    animationFrameRef.current = requestAnimationFrame(detectPoses);
+    detectPose();
 
     return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
       }
     };
-  }, [mode, poseLibrary]);
+  }, [screen, poseLibrary]);
 
-  const capturePose = () => {
-    if (!poseRef.current) {
-      setStatusMessage('No pose detected to capture. Align yourself within the camera view.');
-      return;
-    }
-
-    const normalizedKeypoints = normalizeKeypoints(poseRef.current.keypoints);
-    if (!normalizedKeypoints) {
-      setStatusMessage('Pose confidence is too low. Try a clearer pose.');
-      return;
-    }
-
-    setPoseLibrary((prev) => ({
-      ...prev,
-      [selectedNote]: normalizedKeypoints,
-    }));
-    setStatusMessage(`Captured pose for ${selectedNote.toUpperCase()}.`);
-  };
-
-  const clearPose = (note: string) => {
-    setPoseLibrary((prev) => {
-      const updated = { ...prev };
-      delete updated[note];
-      return updated;
-    });
-    setStatusMessage(`Cleared saved pose for ${note.toUpperCase()}.`);
-  };
-
-  const playNote = (note: string) => {
-    const now = Date.now();
-    if (lastPlayedNoteRef.current === note && now - lastPlayTimestampRef.current < 800) {
-      return;
-    }
-
-    const audio = new Audio(`/notes/${note}.mp3`);
-    audio.play().catch((error) => console.error('Error playing audio:', error));
-
-    lastPlayedNoteRef.current = note;
-    lastPlayTimestampRef.current = now;
-  };
-
-  const drawPose = (pose: poseDetection.Pose) => {
-    if (!canvasRef.current || !videoRef.current) {
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    const video = videoRef.current;
-
-    if (!context) {
-      return;
-    }
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    context.clearRect(0, 0, canvas.width, canvas.height);
-
-    context.strokeStyle = '#22c55e';
-    context.lineWidth = 4;
-    context.fillStyle = '#16a34a';
-
-    pose.keypoints.forEach((keypoint) => {
-      if ((keypoint.score ?? 0) < 0.3) {
-        return;
+  const drawPose = (pose: poseDetection.Pose, ctx: CanvasRenderingContext2D) => {
+    // Draw keypoints
+    pose.keypoints.forEach((kp) => {
+      if ((kp.score || 0) > 0.3) {
+        ctx.beginPath();
+        ctx.arc(kp.x, kp.y, 8, 0, 2 * Math.PI);
+        ctx.fillStyle = '#10b981';
+        ctx.fill();
       }
-      context.beginPath();
-      context.arc(keypoint.x, keypoint.y, 6, 0, 2 * Math.PI);
-      context.fill();
     });
+
+    // Draw skeleton
+    const adjacentPairs = poseDetection.util.getAdjacentPairs(
+      poseDetection.SupportedModels.MoveNet
+    );
 
     adjacentPairs.forEach(([i, j]) => {
       const kp1 = pose.keypoints[i];
       const kp2 = pose.keypoints[j];
-      if ((kp1.score ?? 0) < 0.3 || (kp2.score ?? 0) < 0.3) {
-        return;
+
+      if ((kp1.score || 0) > 0.3 && (kp2.score || 0) > 0.3) {
+        ctx.beginPath();
+        ctx.moveTo(kp1.x, kp1.y);
+        ctx.lineTo(kp2.x, kp2.y);
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 3;
+        ctx.stroke();
       }
-      context.beginPath();
-      context.moveTo(kp1.x, kp1.y);
-      context.lineTo(kp2.x, kp2.y);
-      context.stroke();
     });
   };
 
-  const clearCanvas = () => {
-    if (!canvasRef.current) {
-      return;
-    }
-    const context = canvasRef.current.getContext('2d');
-    if (context) {
-      context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    }
+  const normalizePose = (keypoints: poseDetection.Keypoint[]) => {
+    const validPoints = keypoints.filter(kp => (kp.score || 0) > 0.3);
+    if (validPoints.length === 0) return null;
+
+    const centerX = validPoints.reduce((sum, kp) => sum + kp.x, 0) / validPoints.length;
+    const centerY = validPoints.reduce((sum, kp) => sum + kp.y, 0) / validPoints.length;
+
+    const maxDist = Math.max(
+      ...validPoints.map(kp =>
+        Math.sqrt((kp.x - centerX) ** 2 + (kp.y - centerY) ** 2)
+      )
+    ) || 1;
+
+    return keypoints.map(kp => ({
+      x: (kp.x - centerX) / maxDist,
+      y: (kp.y - centerY) / maxDist,
+      score: kp.score
+    }));
   };
 
-  const poseLibraryCount = useMemo(() => Object.keys(poseLibrary).length, [poseLibrary]);
+  const capturePose = async () => {
+    if (!detectorRef.current || !videoRef.current) return;
+
+    const poses = await detectorRef.current.estimatePoses(videoRef.current);
+    if (poses.length === 0) {
+      alert('No pose detected! Please stand in front of the camera.');
+      return;
+    }
+
+    const normalized = normalizePose(poses[0].keypoints);
+    if (!normalized) {
+      alert('Pose quality too low. Try again!');
+      return;
+    }
+
+    setPoseLibrary(prev => ({
+      ...prev,
+      [selectedNote]: { keypoints: normalized }
+    }));
+
+    setCurrentNote(`Captured pose for ${selectedNote.toUpperCase()}!`);
+    setTimeout(() => setCurrentNote(''), 2000);
+  };
+
+  const matchPose = (pose: poseDetection.Pose): string | null => {
+    const normalized = normalizePose(pose.keypoints);
+    if (!normalized) return null;
+
+    let bestMatch: string | null = null;
+    let bestScore = Infinity;
+
+    Object.entries(poseLibrary).forEach(([note, saved]) => {
+      let distance = 0;
+      let count = 0;
+
+      normalized.forEach((kp, i) => {
+        const savedKp = saved.keypoints[i];
+        if ((kp.score || 0) > 0.3 && (savedKp.score || 0) > 0.3) {
+          distance += Math.sqrt(
+            (kp.x - savedKp.x) ** 2 + (kp.y - savedKp.y) ** 2
+          );
+          count++;
+        }
+      });
+
+      if (count > 0) {
+        const avgDistance = distance / count;
+        if (avgDistance < bestScore) {
+          bestScore = avgDistance;
+          bestMatch = note;
+        }
+      }
+    });
+
+    return bestScore < 0.35 ? bestMatch : null;
+  };
+
+  const playNote = (note: string) => {
+    const now = Date.now();
+    if (lastPlayedRef.current.note === note && now - lastPlayedRef.current.time < 500) {
+      return;
+    }
+
+    const audio = new Audio(`/notes/${note}.mp3`);
+    audio.play().catch(() => {
+      // Fallback - use Web Audio API to generate tone
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const frequencies: { [key: string]: number } = {
+        do: 261.63, re: 293.66, mi: 329.63, fa: 349.23,
+        so: 392.00, la: 440.00, ti: 493.88
+      };
+
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+
+      oscillator.frequency.value = frequencies[note];
+      oscillator.type = 'sine';
+
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.5);
+    });
+
+    lastPlayedRef.current = { note, time: now };
+  };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white">
-      <div className="max-w-5xl mx-auto px-6 py-10">
-        <h1 className="text-4xl font-bold mb-6 text-center">FingerMusic Pose Trainer</h1>
-        <p className="text-center text-slate-300 mb-8">
-          Use your camera to map body poses to musical notes and perform hands-free melodies.
-        </p>
+    <div className="min-h-screen bg-gradient-to-br from-purple-500 via-pink-500 to-orange-400">
+      <div className="container mx-auto px-4 py-6 max-w-2xl">
+        {/* Header */}
+        <div className="text-center mb-6">
+          <h1 className="text-4xl md:text-5xl font-bold text-white mb-2">
+            Pose Music
+          </h1>
+          <p className="text-white/90 text-lg">
+            {screen === 'setup' ? 'Create your poses!' : 'Play music with your body!'}
+          </p>
+        </div>
 
-        <div className="flex flex-col lg:flex-row gap-6">
-          <div className="flex-1 space-y-4">
-            <div className="relative rounded-xl overflow-hidden shadow-lg">
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full rounded-xl"
-              />
-              <canvas ref={canvasRef} className="absolute inset-0" />
+        {/* Video Feed */}
+        <div className="relative bg-black rounded-3xl overflow-hidden shadow-2xl mb-6">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-auto transform -scale-x-100"
+          />
+          <canvas
+            ref={canvasRef}
+            className="absolute top-0 left-0 w-full h-full transform -scale-x-100"
+          />
+
+          {isModelLoading && (
+            <div className="absolute inset-0 bg-black/80 flex items-center justify-center">
+              <div className="text-white text-xl">Loading...</div>
             </div>
-            <div className="bg-slate-800 rounded-xl p-4 space-y-3">
-              <div className="flex flex-wrap gap-3 items-center justify-between">
-                <div>
-                  <span className="text-sm uppercase tracking-wide text-slate-400">Mode</span>
-                  <div className="mt-1 flex gap-2">
-                    <button
-                      className={`px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
-                        mode === 'train' ? 'bg-emerald-500 text-slate-900' : 'bg-slate-700'
-                      }`}
-                      onClick={() => {
-                        setMode('train');
-                        setCurrentNote('None');
-                        setStatusMessage('Training mode: capture poses for each note.');
-                      }}
-                    >
-                      1. Train Poses
-                    </button>
-                    <button
-                      className={`px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
-                        mode === 'perform' ? 'bg-emerald-500 text-slate-900' : 'bg-slate-700'
-                      } ${poseLibraryCount === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      onClick={() => {
-                        if (poseLibraryCount === 0) {
-                          setStatusMessage('Capture at least one pose before switching to performance mode.');
-                          return;
-                        }
-                        setMode('perform');
-                        setStatusMessage('Performance mode: hold a trained pose to play its note.');
-                      }}
-                    >
-                      2. Perform
-                    </button>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm uppercase tracking-wide text-slate-400 block">Current Note</span>
-                  <span className="text-2xl font-semibold text-emerald-400">{currentNote}</span>
-                </div>
-              </div>
+          )}
 
-              {mode === 'train' && (
-                <div className="space-y-3">
-                  <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
-                    <label className="text-sm font-medium text-slate-300" htmlFor="note-select">
-                      Assign pose to note
-                    </label>
-                    <select
-                      id="note-select"
-                      value={selectedNote}
-                      onChange={(event) => setSelectedNote(event.target.value)}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                    >
-                      {NOTES.map((note) => (
-                        <option key={note} value={note}>
-                          {note.toUpperCase()}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="flex flex-wrap gap-3">
-                    <button
-                      onClick={capturePose}
-                      className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400 transition-colors"
-                    >
-                      Capture Current Pose
-                    </button>
-                    {poseLibrary[selectedNote] && (
-                      <button
-                        onClick={() => clearPose(selectedNote)}
-                        className="px-4 py-2 rounded-lg bg-red-500 text-white font-semibold hover:bg-red-400 transition-colors"
-                      >
-                        Clear {selectedNote.toUpperCase()}
-                      </button>
-                    )}
-                  </div>
-                  <p className="text-sm text-slate-400">
-                    Stand still for a moment before capturing to ensure a confident reading. You can re-capture any note at any time.
-                  </p>
-                </div>
-              )}
-
-              {mode === 'perform' && (
-                <p className="text-sm text-slate-400">
-                  Hold one of your trained poses steady to trigger its musical note. Try transitioning smoothly between poses to play melodies.
-                </p>
-              )}
-
-              <div className="pt-3 border-t border-slate-700">
-                <p className="text-sm text-slate-300">{statusMessage}</p>
-                {errorMessage && <p className="text-sm text-red-400 mt-2">{errorMessage}</p>}
-                {isLoadingDetector && <p className="text-sm text-slate-400 mt-2">Loading MoveNet model...</p>}
+          {detectedNote && screen === 'play' && (
+            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-white/90 px-8 py-4 rounded-full">
+              <div className="text-4xl font-bold text-purple-600">
+                {detectedNote.toUpperCase()}
               </div>
             </div>
-          </div>
+          )}
+        </div>
 
-          <div className="w-full lg:w-72 bg-slate-800 rounded-xl p-5 space-y-4 h-fit">
-            <h2 className="text-xl font-semibold">Pose Library</h2>
-            <p className="text-sm text-slate-400">
-              Capture unique poses for each solfège note. Each saved pose will be used during performance mode for matching.
-            </p>
-            <ul className="space-y-2">
-              {NOTES.map((note) => (
-                <li
+        {/* Setup Screen */}
+        {screen === 'setup' && (
+          <div className="bg-white/95 backdrop-blur rounded-3xl p-6 shadow-2xl">
+            <h2 className="text-2xl font-bold text-purple-600 mb-4">
+              Pick a Note
+            </h2>
+
+            <div className="grid grid-cols-4 gap-2 mb-6">
+              {NOTES.map(note => (
+                <button
                   key={note}
-                  className={`flex items-center justify-between px-3 py-2 rounded-lg border ${
-                    poseLibrary[note] ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-700'
+                  onClick={() => setSelectedNote(note)}
+                  className={`py-3 px-2 rounded-xl font-bold text-lg transition-all ${
+                    selectedNote === note
+                      ? 'bg-purple-600 text-white scale-105'
+                      : poseLibrary[note]
+                      ? 'bg-green-500 text-white'
+                      : 'bg-gray-200 text-gray-700'
                   }`}
                 >
-                  <span className="font-medium">{note.toUpperCase()}</span>
-                  <span className="text-xs uppercase tracking-wide text-slate-400">
-                    {poseLibrary[note] ? 'Captured' : 'Not set'}
-                  </span>
-                </li>
+                  {note.toUpperCase()}
+                </button>
               ))}
-            </ul>
-            <div className="text-sm text-slate-400 border-t border-slate-700 pt-3">
-              Saved poses: {poseLibraryCount} / {NOTES.length}
             </div>
+
+            <button
+              onClick={capturePose}
+              disabled={isModelLoading}
+              className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white py-4 rounded-2xl font-bold text-xl mb-4 active:scale-95 transition-transform disabled:opacity-50"
+            >
+              Capture {selectedNote.toUpperCase()}
+            </button>
+
+            {currentNote && (
+              <div className="text-center text-green-600 font-semibold mb-4">
+                {currentNote}
+              </div>
+            )}
+
+            <button
+              onClick={() => setScreen('play')}
+              disabled={Object.keys(poseLibrary).length === 0}
+              className="w-full bg-gradient-to-r from-orange-500 to-red-500 text-white py-4 rounded-2xl font-bold text-xl active:scale-95 transition-transform disabled:opacity-50 disabled:grayscale"
+            >
+              Start Playing! ({Object.keys(poseLibrary).length}/7)
+            </button>
+
+            <p className="text-sm text-gray-600 mt-4 text-center">
+              Strike a unique pose for each note, then tap capture!
+            </p>
           </div>
-        </div>
+        )}
+
+        {/* Play Screen */}
+        {screen === 'play' && (
+          <div className="bg-white/95 backdrop-blur rounded-3xl p-6 shadow-2xl">
+            <h2 className="text-2xl font-bold text-purple-600 mb-4 text-center">
+              Move to Play Music!
+            </h2>
+
+            <div className="grid grid-cols-4 gap-2 mb-6">
+              {NOTES.map(note => (
+                <div
+                  key={note}
+                  className={`py-3 px-2 rounded-xl font-bold text-center transition-all ${
+                    poseLibrary[note]
+                      ? detectedNote === note
+                        ? 'bg-yellow-400 text-purple-900 scale-110'
+                        : 'bg-green-500 text-white'
+                      : 'bg-gray-200 text-gray-400'
+                  }`}
+                >
+                  {note.toUpperCase()}
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={() => setScreen('setup')}
+              className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white py-4 rounded-2xl font-bold text-xl active:scale-95 transition-transform"
+            >
+              Back to Setup
+            </button>
+
+            <p className="text-sm text-gray-600 mt-4 text-center">
+              Hold your saved poses to play the notes!
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
-}
-
-function normalizeKeypoints(keypoints: poseDetection.Keypoint[]): NormalizedKeypoint[] | null {
-  const confident = keypoints.filter((keypoint) => (keypoint.score ?? 0) > 0.3);
-  if (confident.length === 0) {
-    return null;
-  }
-
-  const centerX = confident.reduce((sum, point) => sum + point.x, 0) / confident.length;
-  const centerY = confident.reduce((sum, point) => sum + point.y, 0) / confident.length;
-
-  let maxDistance = 0;
-  confident.forEach((point) => {
-    const dx = point.x - centerX;
-    const dy = point.y - centerY;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    if (distance > maxDistance) {
-      maxDistance = distance;
-    }
-  });
-
-  const scale = maxDistance || 1;
-
-  return keypoints.map((keypoint) => ({
-    x: (keypoint.x - centerX) / scale,
-    y: (keypoint.y - centerY) / scale,
-    score: keypoint.score,
-  }));
-}
-
-function classifyPose(pose: poseDetection.Pose, library: PoseLibrary): string | null {
-  const normalizedCandidate = normalizeKeypoints(pose.keypoints);
-  if (!normalizedCandidate) {
-    return null;
-  }
-
-  let bestNote: string | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (const [note, savedKeypoints] of Object.entries(library)) {
-    const distance = calculatePoseDistance(normalizedCandidate, savedKeypoints);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestNote = note;
-    }
-  }
-
-  if (bestNote && bestDistance <= MATCH_THRESHOLD) {
-    return bestNote;
-  }
-
-  return null;
-}
-
-function calculatePoseDistance(
-  candidate: NormalizedKeypoint[],
-  reference: NormalizedKeypoint[]
-): number {
-  if (candidate.length !== reference.length) {
-    return Number.POSITIVE_INFINITY;
-  }
-
-  let totalDistance = 0;
-  let usedCount = 0;
-
-  for (let i = 0; i < candidate.length; i += 1) {
-    const candidateScore = candidate[i].score ?? 0;
-    const referenceScore = reference[i].score ?? 0;
-
-    if (candidateScore < 0.2 && referenceScore < 0.2) {
-      continue;
-    }
-
-    const dx = candidate[i].x - reference[i].x;
-    const dy = candidate[i].y - reference[i].y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    totalDistance += distance;
-    usedCount += 1;
-  }
-
-  if (usedCount === 0) {
-    return Number.POSITIVE_INFINITY;
-  }
-
-  return totalDistance / usedCount;
 }
