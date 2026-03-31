@@ -12,10 +12,19 @@ type PoseLibrary = {
 };
 
 const NOTES = ['do', 're', 'mi', 'fa', 'so', 'la', 'ti'];
+const POSE_LIBRARY_KEY = 'fingermusic-pose-library';
 
 export default function Home() {
   const [screen, setScreen] = useState<'setup' | 'play'>('setup');
-  const [poseLibrary, setPoseLibrary] = useState<PoseLibrary>({});
+  const [poseLibrary, setPoseLibrary] = useState<PoseLibrary>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const saved = localStorage.getItem(POSE_LIBRARY_KEY);
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
   const [currentNote, setCurrentNote] = useState<string>('');
   const [selectedNote, setSelectedNote] = useState<string>('do');
   const [isModelLoading, setIsModelLoading] = useState(true);
@@ -26,6 +35,15 @@ export default function Home() {
   const detectorRef = useRef<poseDetection.PoseDetector | null>(null);
   const animationRef = useRef<number>();
   const lastPlayedRef = useRef<{ note: string; time: number }>({ note: '', time: 0 });
+
+  // Persist pose library to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(POSE_LIBRARY_KEY, JSON.stringify(poseLibrary));
+    } catch {
+      // Storage full or unavailable - silently ignore
+    }
+  }, [poseLibrary]);
 
   // Initialize pose detector
   useEffect(() => {
@@ -362,8 +380,18 @@ export default function Home() {
               Start Playing! ({Object.keys(poseLibrary).length}/7)
             </button>
 
+            {Object.keys(poseLibrary).length > 0 && (
+              <button
+                onClick={() => setPoseLibrary({})}
+                className="w-full mt-4 bg-gray-200 text-gray-700 py-3 rounded-2xl font-semibold active:scale-95 transition-transform"
+              >
+                Clear All Poses
+              </button>
+            )}
+
             <p className="text-sm text-gray-600 mt-4 text-center">
               Strike a unique pose for each note, then tap capture!
+              {Object.keys(poseLibrary).length > 0 && ' Poses are saved automatically.'}
             </p>
           </div>
         )}
